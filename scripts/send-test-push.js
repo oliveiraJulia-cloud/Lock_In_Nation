@@ -6,6 +6,12 @@ import admin from "firebase-admin";
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
+// Diagnóstico seguro: confirma QUAL credencial está sendo usada, sem expor a chave privada.
+console.log("project_id:", serviceAccount.project_id);
+console.log("client_email:", serviceAccount.client_email);
+console.log("private_key começa com:", serviceAccount.private_key?.slice(0, 30));
+console.log("private_key tem quebras de linha reais?", serviceAccount.private_key?.includes("\n"));
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
