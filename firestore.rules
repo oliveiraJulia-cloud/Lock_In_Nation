@@ -1,0 +1,23 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Documento único que guarda o token de notificação deste dispositivo.
+    // Regra de "primeiro a escrever, dono pra sempre": qualquer usuário anônimo
+    // autenticado pode CRIAR esse documento se ele ainda não existir, mas depois
+    // de criado, só o mesmo uid (ownerUid) consegue atualizar. Isso evita que um
+    // estranho que descobrir o firebaseConfig público sobrescreva seu token.
+    match /device/current {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // Tudo mais fica bloqueado por padrão até a Etapa 6, quando adicionamos
+    // as coleções de metas/progresso com a mesma lógica de dono.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
