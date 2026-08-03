@@ -2,6 +2,8 @@ name: Testar envio de notificação
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
 
 jobs:
   send-test:
