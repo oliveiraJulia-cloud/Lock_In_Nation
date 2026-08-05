@@ -952,3 +952,83 @@ function renderDynamicFields(overlay, state) {
       </div>
     `;
   } else if (state.type === "avulso") {
+    html += `
+      <div class="field-group">
+        <div class="field-label">Data</div>
+        <input type="date" id="f-date" />
+      </div>
+    `;
+    html += whenBlock();
+  } else if (state.type === "mensal") {
+    html += `
+      <div class="field-group">
+        <div class="field-label">Dia do mês</div>
+        <input type="number" id="f-day-of-month" min="1" max="31" value="1" />
+      </div>
+    `;
+    html += whenBlock();
+  }
+
+  dyn.innerHTML = html;
+
+  const anyTimeBtns = dyn.querySelectorAll("[data-anytime]");
+  anyTimeBtns.forEach((btn) => {
+    if (btn.dataset.anytime === "false") btn.classList.add("active");
+    btn.addEventListener("click", () => {
+      anyTimeBtns.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.anyTime = btn.dataset.anytime === "true";
+      const timeInput = dyn.querySelector("#f-time");
+      if (timeInput) timeInput.style.display = state.anyTime ? "none" : "block";
+    });
+  });
+
+  const weekdayRow = dyn.querySelector("#f-weekdays");
+  if (weekdayRow) {
+    state.weekdays = new Set([1, 3, 5]);
+    weekdayRow.querySelectorAll(".weekday-btn").forEach((btn) => {
+      const day = Number(btn.dataset.day);
+      if (state.weekdays.has(day)) btn.classList.add("active");
+      btn.addEventListener("click", () => {
+        if (state.weekdays.has(day)) { state.weekdays.delete(day); btn.classList.remove("active"); }
+        else { state.weekdays.add(day); btn.classList.add("active"); }
+      });
+    });
+  }
+}
+
+function buildGoalFromState(state, overlay) {
+  const base = { title: state.title.trim(), cat: state.cat, type: state.type };
+
+  if (state.type === "checklist") {
+    return { ...base, weekdays: Array.from(state.weekdays || [1, 3, 5]), anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
+  }
+  if (state.type === "daily") {
+    return { ...base, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
+  }
+  if (state.type === "intervalo") {
+    return {
+      ...base,
+      intervalStart: overlay.querySelector("#f-int-start").value,
+      intervalEnd: overlay.querySelector("#f-int-end").value,
+      everyHours: Number(overlay.querySelector("#f-int-every").value) || 1,
+    };
+  }
+  if (state.type === "avulso") {
+    const date = overlay.querySelector("#f-date").value;
+    if (!date) { alert("Escolhe uma data."); return null; }
+    return { ...base, date, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
+  }
+  if (state.type === "mensal") {
+    return {
+      ...base,
+      dayOfMonth: Number(overlay.querySelector("#f-day-of-month").value) || 1,
+      anyTime: state.anyTime,
+      time: overlay.querySelector("#f-time").value,
+      anyTimeWindow: ["09:00", "21:00"],
+    };
+  }
+  return base;
+}
+
+boot();
