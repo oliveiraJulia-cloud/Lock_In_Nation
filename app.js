@@ -349,3 +349,190 @@ function openAddSheet() {
           ).join("")}
         </div>
       </div>
+
+      <div class="field-group">
+        <div class="field-label">Tipo</div>
+        <div class="pill-row" id="f-type-row">
+          ${Object.entries(TYPE_META).map(([k, m]) =>
+            `<button type="button" class="pill" data-type="${k}" style="color:${m.color}">${m.label}</button>`
+          ).join("")}
+        </div>
+        <div class="hint" id="f-type-hint"></div>
+      </div>
+
+      <div id="f-dynamic"></div>
+
+      <button class="save-btn" id="f-save" disabled>Salvar meta</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const state = { title: "", cat: "academia", type: "checklist", anyTime: false };
+  overlay.querySelector('[data-cat="academia"]').classList.add("active");
+  overlay.querySelector('[data-type="checklist"]').classList.add("active");
+
+  overlay.querySelector("#close-sheet").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("#f-title").addEventListener("input", (e) => { state.title = e.target.value; updateSaveBtn(); });
+
+  overlay.querySelectorAll("#f-cat-row .pill").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      overlay.querySelectorAll("#f-cat-row .pill").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.cat = btn.dataset.cat;
+    });
+  });
+
+  overlay.querySelectorAll("#f-type-row .pill").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      overlay.querySelectorAll("#f-type-row .pill").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.type = btn.dataset.type;
+      renderDynamicFields(overlay, state);
+      updateSaveBtn();
+    });
+  });
+
+  function updateSaveBtn() {
+    overlay.querySelector("#f-save").disabled = !state.title.trim();
+  }
+
+  renderDynamicFields(overlay, state);
+
+  overlay.querySelector("#f-save").addEventListener("click", async () => {
+    if (!state.title.trim()) return;
+    const newGoal = buildGoalFromState(state, overlay);
+    if (!newGoal) return;
+    await addDoc(collection(db, "goals"), { ...newGoal, ownerUid: currentUid, createdAt: serverTimestamp() });
+    overlay.remove();
+  });
+}
+
+function renderDynamicFields(overlay, state) {
+  const hint = overlay.querySelector("#f-type-hint");
+  const dyn = overlay.querySelector("#f-dynamic");
+
+  const hints = {
+    daily: 'Ex: "lavar louça" — notifica todo dia, sem escolher dias da semana.',
+    intervalo: 'Ex: "comer alguma coisa" — te lembra várias vezes ao longo do dia.',
+    avulso: 'Ex: "pagar conta de luz" — acontece uma vez só, numa data específica.',
+    mensal: 'Ex: "registrar peso" — dispara todo mês, num dia fixo.',
+    checklist: "",
+  };
+  hint.textContent = hints[state.type] || "";
+
+  const whenBlock = (defaultTime = "18:00") => `
+    <div class="field-group">
+      <div class="field-label">Quando notificar</div>
+      <div class="pill-row" style="margin-bottom:10px;">
+        <button type="button" class="pill" data-anytime="false" style="color:var(--accentLight)">Horário fixo</button>
+        <button type="button" class="pill" data-anytime="true" style="color:var(--gold)">Algum momento</button>
+      </div>
+      <input type="time" id="f-time" value="${defaultTime}" />
+    </div>
+  `;
+
+  let html = "";
+  if (state.type === "checklist") {
+    html += whenBlock();
+    html += `
+      <div class="field-group">
+        <div class="field-label">Dias da semana</div>
+        <div class="weekday-row" id="f-weekdays">
+          ${WEEKDAY_LABELS.map((d, i) => `<button type="button" class="weekday-btn" data-day="${i}">${d}</button>`).join("")}
+        </div>
+      </div>
+    `;
+  } else if (state.type === "daily") {
+    html += whenBlock();
+  } else if (state.type === "intervalo") {
+    html += `
+      <div class="field-group">
+        <div class="field-label">Janela e frequência</div>
+        <div style="display:flex; gap:8px;">
+          <input type="time" id="f-int-start" value="07:00" />
+          <input type="time" id="f-int-end" value="22:00" />
+          <input type="number" id="f-int-every" value="3" min="1" style="width:64px;" />
+        </div>
+      </div>
+    `;
+  } else if (state.type === "avulso") {
+    html += `
+      <div class="field-group">
+        <div class="field-label">Data</div>
+        <input type="date" id="f-date" />
+      </div>
+    `;
+    html += whenBlock();
+  } else if (state.type === "mensal") {
+    html += `
+      <div class="field-group">
+        <div class="field-label">Dia do mês</div>
+        <input type="number" id="f-day-of-month" min="1" max="31" value="1" />
+      </div>
+    `;
+    html += whenBlock();
+  }
+
+  dyn.innerHTML = html;
+
+  const anyTimeBtns = dyn.querySelectorAll("[data-anytime]");
+  anyTimeBtns.forEach((btn) => {
+    if (btn.dataset.anytime === "false") btn.classList.add("active");
+    btn.addEventListener("click", () => {
+      anyTimeBtns.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      state.anyTime = btn.dataset.anytime === "true";
+      const timeInput = dyn.querySelector("#f-time");
+      if (timeInput) timeInput.style.display = state.anyTime ? "none" : "block";
+    });
+  });
+
+  const weekdayRow = dyn.querySelector("#f-weekdays");
+  if (weekdayRow) {
+    state.weekdays = new Set([1, 3, 5]);
+    weekdayRow.querySelectorAll(".weekday-btn").forEach((btn) => {
+      const day = Number(btn.dataset.day);
+      if (state.weekdays.has(day)) btn.classList.add("active");
+      btn.addEventListener("click", () => {
+        if (state.weekdays.has(day)) { state.weekdays.delete(day); btn.classList.remove("active"); }
+        else { state.weekdays.add(day); btn.classList.add("active"); }
+      });
+    });
+  }
+}
+
+function buildGoalFromState(state, overlay) {
+  const base = { title: state.title.trim(), cat: state.cat, type: state.type };
+
+  if (state.type === "checklist") {
+    return { ...base, weekdays: Array.from(state.weekdays || [1, 3, 5]), anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
+  }
+  if (state.type === "daily") {
+    return { ...base, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
+  }
+  if (state.type === "intervalo") {
+    return {
+      ...base,
+      intervalStart: overlay.querySelector("#f-int-start").value,
+      intervalEnd: overlay.querySelector("#f-int-end").value,
+      everyHours: Number(overlay.querySelector("#f-int-every").value) || 1,
+    };
+  }
+  if (state.type === "avulso") {
+    const date = overlay.querySelector("#f-date").value;
+    if (!date) { alert("Escolhe uma data."); return null; }
+    return { ...base, date, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
+  }
+  if (state.type === "mensal") {
+    return {
+      ...base,
+      dayOfMonth: Number(overlay.querySelector("#f-day-of-month").value) || 1,
+      anyTime: state.anyTime,
+      time: overlay.querySelector("#f-time").value,
+      anyTimeWindow: ["09:00", "21:00"],
+    };
+  }
+  return base;
+}
+
+boot();
