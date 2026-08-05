@@ -33,16 +33,19 @@ const WEEKDAY_LABELS = ["D", "S", "T", "Q", "Q", "S", "S"]; // índice 0 = Domin
 let currentUid = null;
 let swRegistration = null;
 let goals = [];
-let completions = {}; // chave: goalId -> { done, count }
+let completions = {}; // hoje: goalId -> { done, count }
+let allCompletions = []; // histórico completo, usado em Hoje e Progresso
 let activeTab = "hoje";
 
 const tabContent = document.getElementById("tab-content");
+
+// ---------- utilidades de data (hora local do aparelho) ----------
 
 function todayISO() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
-function todayWeekday() { return new Date().getDay(); }
+function todayWeekday() { return new Date().getDay(); } // 0 = Domingo
 function todayDayOfMonth() { return new Date().getDate(); }
 
 function toMinutes(hhmm) {
@@ -63,6 +66,8 @@ function isActiveToday(g) {
   if (g.type === "mensal") return g.dayOfMonth === todayDayOfMonth();
   return false;
 }
+
+// ---------- boot ----------
 
 async function boot() {
   try {
@@ -111,6 +116,8 @@ async function activateNotifications() {
   }
 }
 
+// ---------- dados: metas ----------
+
 function listenGoals() {
   const q = query(collection(db, "goals"), where("ownerUid", "==", currentUid));
   onSnapshot(q, (snap) => {
@@ -125,15 +132,17 @@ async function deleteGoal(id) {
   await deleteDoc(doc(db, "goals", id));
 }
 
+// ---------- dados: progresso do dia ----------
+
 function listenCompletions() {
-  const q = query(collection(db, "completions"), where("ownerUid", "==", currentUid), where("date", "==", todayISO()));
+  const q = query(collection(db, "completions"), where("ownerUid", "==", currentUid));
   onSnapshot(q, (snap) => {
+    allCompletions = snap.docs.map((d) => d.data());
+    const t = todayISO();
     completions = {};
-    snap.docs.forEach((d) => {
-      const data = d.data();
-      completions[data.goalId] = data;
-    });
+    allCompletions.forEach((c) => { if (c.date === t) completions[c.goalId] = c; });
     if (activeTab === "hoje") renderHoje();
+    if (activeTab === "progresso") renderProgresso();
   });
 }
 
@@ -152,17 +161,17 @@ async function incrementCheckin(goalId, total) {
   }, { merge: true });
 }
 
+// ---------- navegação de abas ----------
+
 function setTab(tab) {
   activeTab = tab;
   document.querySelectorAll("nav.tabbar button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   if (tab === "metas") renderMetas();
   else if (tab === "hoje") renderHoje();
-  else renderPlaceholder(tab);
+  else renderProgresso();
 }
 
-function renderPlaceholder(tab) {
-  tabContent.innerHTML = `<div class="placeholder">A aba "Progresso" ainda está sendo construída — chega na próxima etapa 🚧</div>`;
-}
+// ---------- render: Hoje ----------
 
 function renderHoje() {
   const todays = goals.filter(isActiveToday);
@@ -258,6 +267,239 @@ function hojeCardHTML(g) {
   `;
 }
 
+// ---------- histórico (usado por streak, semanas e resumo mensal) ----------
+
+function isoFromDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function isActiveOnDate(g, d) {
+  const dateISO = isoFromDate(d);
+  if (g.createdAt?.toDate) {
+    const createdISO = isoFromDate(g.createdAt.toDate());
+    if (dateISO < createdISO) return false;
+  }
+  if (g.type === "checklist") return (g.weekdays || []).includes(d.getDay());
+  if (g.type === "daily") return true;
+  if (g.type === "intervalo") return true;
+  if (g.type === "avulso") return g.date === dateISO;
+  if (g.type === "mensal") return g.dayOfMonth === d.getDate();
+  return false;
+}
+
+function isDoneForDate(g, dateISO) {
+  const c = allCompletions.find((x) => x.goalId === g.id && x.date === dateISO);
+  if (g.type === "intervalo") return (c?.count || 0) >= computeIntervaloTotal(g);
+  return !!c?.done;
+}
+
+function buildHistory(daysBack) {
+  const days = [];
+  const today = new Date();
+  for (let i = daysBack - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const dateISO = isoFromDate(d);
+    const items = goals.filter((g) => isActiveOnDate(g, d)).map((g) => ({ goal: g, done: isDoneForDate(g, dateISO) }));
+    days.push({ dateISO, date: d, weekday: d.getDay(), items });
+  }
+  return days; // ordem crescente, último = hoje
+}
+
+function computeCurrentStreak(history) {
+  let streak = 0;
+  for (let i = history.length - 2; i >= 0; i--) { // começa em ontem, hoje não conta enquanto o dia não fechar
+    const day = history[i];
+    if (day.items.length === 0) continue;
+    if (day.items.every((it) => it.done)) streak++;
+    else break;
+  }
+  return streak;
+}
+
+function computeLongestStreak(history) {
+  let longest = 0, run = 0;
+  for (const day of history) {
+    if (day.items.length === 0) continue;
+    if (day.items.every((it) => it.done)) { run++; longest = Math.max(longest, run); }
+    else run = 0;
+  }
+  return longest;
+}
+
+function buildWeeks(history) {
+  const weeks = [];
+  for (let start = history.length - 7; start >= 0; start -= 7) {
+    weeks.unshift(history.slice(start, start + 7));
+  }
+  return weeks;
+}
+
+function weekPct(chunk) {
+  const total = chunk.reduce((s, d) => s + d.items.length, 0);
+  const done = chunk.reduce((s, d) => s + d.items.filter((it) => it.done).length, 0);
+  return total ? Math.round((done / total) * 100) : 0;
+}
+
+function monthCategorySummary(history) {
+  const monthPrefix = todayISO().slice(0, 7);
+  const cats = { academia: { done: 0, total: 0 }, saude: { done: 0, total: 0 }, domestico: { done: 0, total: 0 }, outros: { done: 0, total: 0 } };
+  history.filter((d) => d.dateISO.startsWith(monthPrefix)).forEach((d) => {
+    d.items.forEach((it) => {
+      const c = cats[it.goal.cat] || cats.outros;
+      c.total++;
+      if (it.done) c.done++;
+    });
+  });
+  return Object.entries(cats).map(([cat, v]) => ({ cat, pct: v.total ? Math.round((v.done / v.total) * 100) : 0, total: v.total }));
+}
+
+const DAY_LABELS_PT = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const WEEK_ROW_LABELS = ["Sem 1", "Sem 2", "Sem 3", "Sem 4 (atual)"];
+
+// ---------- render: Progresso ----------
+
+function renderProgresso() {
+  const history = buildHistory(28);
+  const currentStreak = computeCurrentStreak(history);
+  const longestStreak = computeLongestStreak(history);
+  const weeks = buildWeeks(history).slice(-4);
+
+  let html = `
+    <h1 class="page-title">PROGRESSO</h1>
+
+    <div class="goal-card" style="gap:14px; padding:16px;">
+      <div style="width:48px; height:48px; border-radius:14px; background:linear-gradient(135deg, var(--accent), var(--accentLight)); display:flex; align-items:center; justify-content:center; font-size:22px; flex-shrink:0;">🔥</div>
+      <div>
+        <div style="font-family:'Big Shoulders Display'; font-weight:800; font-size:26px; line-height:1;">${currentStreak} dias</div>
+        <div style="font-size:11.5px; color:var(--muted); margin-top:2px;">streak atual · maior: ${longestStreak} dias</div>
+      </div>
+    </div>
+
+    <div class="goal-card" style="opacity:.6;">
+      <div class="goal-title">Corpo (peso, medidas, ciclo)</div>
+      <div class="goal-time">em breve 🚧</div>
+    </div>
+
+    <div class="section-label" style="margin-top:14px;">Semanas</div>
+  `;
+
+  weeks.forEach((chunk, i) => {
+    const pct = weekPct(chunk);
+    const label = WEEK_ROW_LABELS[WEEK_ROW_LABELS.length - weeks.length + i] || `Sem ${i + 1}`;
+    html += `
+      <button class="week-row" data-week="${i}" style="width:100%; display:flex; align-items:center; gap:10px; background:transparent; border:none; padding:6px 0; cursor:pointer; color:inherit;">
+        <span style="font-size:12px; color:var(--muted); width:78px; text-align:left; flex-shrink:0;">${label}</span>
+        <div style="flex:1; height:8px; border-radius:4px; background:var(--border); overflow:hidden;">
+          <div style="width:${pct}%; height:100%; background:linear-gradient(90deg, var(--accent), var(--lime));"></div>
+        </div>
+        <span style="font-family:'JetBrains Mono'; font-size:11.5px; width:32px; text-align:right;">${pct}%</span>
+      </button>
+    `;
+  });
+
+  html += `
+    <button id="btn-month-summary" style="width:100%; display:flex; align-items:center; gap:12px; margin-top:16px; background:linear-gradient(135deg, rgba(148,9,183,.15), rgba(48,216,238,.08)); border:1px solid rgba(193,63,224,.4); border-radius:16px; padding:14px 16px; text-align:left; cursor:pointer; color:inherit;">
+      <div style="width:36px; height:36px; border-radius:10px; background:var(--surfaceHi); display:flex; align-items:center; justify-content:center; font-size:16px; flex-shrink:0;">📅</div>
+      <div style="flex:1;">
+        <div style="font-weight:600; font-size:14px;">Fechar o mês</div>
+        <div style="font-size:11.5px; color:var(--muted); margin-top:1px;">Ver resumo por categoria</div>
+      </div>
+    </button>
+  `;
+
+  tabContent.innerHTML = html;
+
+  tabContent.querySelectorAll("[data-week]").forEach((btn) => {
+    btn.addEventListener("click", () => openWeekSheet(weeks[Number(btn.dataset.week)]));
+  });
+  document.getElementById("btn-month-summary").addEventListener("click", () => openMonthSummarySheet(history));
+}
+
+function openWeekSheet(chunk) {
+  const pct = weekPct(chunk);
+  let daysHTML = "";
+  for (const day of chunk) {
+    const [y, m, dd] = day.dateISO.split("-");
+    let itemsHTML = day.items.length
+      ? day.items.map((it) => `
+          <div style="display:flex; align-items:center; gap:8px; padding:4px 0;">
+            <span class="dot" style="background:${CATEGORY_COLOR[it.goal.cat]}"></span>
+            <span style="flex:1; font-size:13px; ${it.done ? "" : "color:var(--muted); text-decoration:line-through;"}">${escapeHTML(it.goal.title)}</span>
+            <span style="font-size:13px;">${it.done ? "✓" : "✕"}</span>
+          </div>
+        `).join("")
+      : `<div style="font-size:12px; color:var(--muted);">Nada agendado</div>`;
+
+    daysHTML += `
+      <div class="goal-card" style="flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="display:flex; gap:8px; align-items:baseline;">
+          <strong style="font-size:13px;">${DAY_LABELS_PT[day.weekday]}</strong>
+          <span style="font-family:'JetBrains Mono'; font-size:11px; color:var(--muted);">${dd}/${m}</span>
+        </div>
+        ${itemsHTML}
+      </div>
+    `;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "sheet-overlay";
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-header">
+        <div>
+          <div class="sheet-title">DETALHE DA SEMANA</div>
+          <div style="font-family:'JetBrains Mono'; font-size:12px; color:var(--lime); margin-top:2px;">${pct}% concluído</div>
+        </div>
+        <button class="sheet-close" id="close-week-sheet">✕</button>
+      </div>
+      ${daysHTML}
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector("#close-week-sheet").addEventListener("click", () => overlay.remove());
+}
+
+function openMonthSummarySheet(history) {
+  const summary = monthCategorySummary(history).sort((a, b) => b.pct - a.pct);
+  const withData = summary.filter((s) => s.total > 0);
+  const best = withData[0];
+  const worst = withData[withData.length - 1];
+  const monthNames = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+  const monthLabel = monthNames[new Date().getMonth()];
+
+  let barsHTML = summary.map((s) => `
+    <div style="margin-bottom:12px;">
+      <div style="display:flex; justify-content:space-between; margin-bottom:5px; font-size:13px;">
+        <span style="text-transform:capitalize;">${s.cat}</span>
+        <span style="font-family:'JetBrains Mono'; color:${CATEGORY_COLOR[s.cat]};">${s.pct}%</span>
+      </div>
+      <div style="height:8px; border-radius:4px; background:var(--border); overflow:hidden;">
+        <div style="width:${s.pct}%; height:100%; background:${CATEGORY_COLOR[s.cat]};"></div>
+      </div>
+    </div>
+  `).join("");
+
+  const overlay = document.createElement("div");
+  overlay.className = "sheet-overlay";
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-header">
+        <span class="sheet-title">RESUMO DE ${monthLabel.toUpperCase()}</span>
+        <button class="sheet-close" id="close-month-sheet">✕</button>
+      </div>
+      ${barsHTML}
+      ${best ? `<div class="goal-card" style="margin-top:6px;">🏆 Melhor categoria: <strong style="text-transform:capitalize; margin-left:4px;">${best.cat}</strong> (${best.pct}%)</div>` : ""}
+      ${worst && worst !== best ? `<div class="goal-card">⚠️ Precisa de atenção: <strong style="text-transform:capitalize; margin-left:4px;">${worst.cat}</strong> (${worst.pct}%)</div>` : ""}
+      ${!withData.length ? `<div class="empty-msg">Sem dados suficientes ainda esse mês.</div>` : ""}
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector("#close-month-sheet").addEventListener("click", () => overlay.remove());
+}
+
+// ---------- render: Metas ----------
+
 function formatDateBR(iso) {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}`;
@@ -325,6 +567,8 @@ function escapeHTML(str) {
   div.textContent = str;
   return div.innerHTML;
 }
+
+// ---------- formulário de cadastro ----------
 
 function openAddSheet() {
   const overlay = document.createElement("div");
