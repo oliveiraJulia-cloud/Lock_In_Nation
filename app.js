@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/fireba
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
 import {
   getFirestore, collection, query, where, onSnapshot,
-  addDoc, deleteDoc, doc, serverTimestamp,
+  addDoc, deleteDoc, doc, setDoc, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-messaging.js";
 
@@ -33,10 +33,36 @@ const WEEKDAY_LABELS = ["D", "S", "T", "Q", "Q", "S", "S"]; // índice 0 = Domin
 let currentUid = null;
 let swRegistration = null;
 let goals = [];
-let activeTab = "metas";
-let unsubscribeGoals = null;
+let completions = {}; // chave: goalId -> { done, count }
+let activeTab = "hoje";
 
 const tabContent = document.getElementById("tab-content");
+
+function todayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function todayWeekday() { return new Date().getDay(); }
+function todayDayOfMonth() { return new Date().getDate(); }
+
+function toMinutes(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return h * 60 + m;
+}
+function computeIntervaloTotal(g) {
+  const start = toMinutes(g.intervalStart), end = toMinutes(g.intervalEnd);
+  if (end <= start || !g.everyHours) return 1;
+  return Math.floor((end - start) / (g.everyHours * 60)) + 1;
+}
+
+function isActiveToday(g) {
+  if (g.type === "checklist") return (g.weekdays || []).includes(todayWeekday());
+  if (g.type === "daily") return true;
+  if (g.type === "intervalo") return true;
+  if (g.type === "avulso") return g.date === todayISO();
+  if (g.type === "mensal") return g.dayOfMonth === todayDayOfMonth();
+  return false;
+}
 
 async function boot() {
   try {
@@ -49,6 +75,7 @@ async function boot() {
     if (!user) return;
     currentUid = user.uid;
     listenGoals();
+    listenCompletions();
     maybeShowNotifBanner();
   });
 
@@ -68,9 +95,7 @@ async function boot() {
 
 function maybeShowNotifBanner() {
   const banner = document.getElementById("notif-banner");
-  if (Notification.permission !== "granted") {
-    banner.style.display = "flex";
-  }
+  if (Notification.permission !== "granted") banner.style.display = "flex";
 }
 
 async function activateNotifications() {
@@ -79,8 +104,7 @@ async function activateNotifications() {
   try {
     const messaging = getMessaging(app);
     const token = await getToken(messaging, { vapidKey: VAPID_KEY, serviceWorkerRegistration: swRegistration });
-    const { setDoc, doc: docRef } = await import("https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js");
-    await setDoc(docRef(db, "device", "current"), { fcmToken: token, ownerUid: currentUid, updatedAt: serverTimestamp() });
+    await setDoc(doc(db, "device", "current"), { fcmToken: token, ownerUid: currentUid, updatedAt: serverTimestamp() });
     document.getElementById("notif-banner").style.display = "none";
   } catch (e) {
     console.error("Erro ao ativar notificações:", e);
@@ -89,9 +113,10 @@ async function activateNotifications() {
 
 function listenGoals() {
   const q = query(collection(db, "goals"), where("ownerUid", "==", currentUid));
-  unsubscribeGoals = onSnapshot(q, (snap) => {
+  onSnapshot(q, (snap) => {
     goals = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     if (activeTab === "metas") renderMetas();
+    if (activeTab === "hoje") renderHoje();
   });
 }
 
@@ -100,16 +125,137 @@ async function deleteGoal(id) {
   await deleteDoc(doc(db, "goals", id));
 }
 
+function listenCompletions() {
+  const q = query(collection(db, "completions"), where("ownerUid", "==", currentUid), where("date", "==", todayISO()));
+  onSnapshot(q, (snap) => {
+    completions = {};
+    snap.docs.forEach((d) => {
+      const data = d.data();
+      completions[data.goalId] = data;
+    });
+    if (activeTab === "hoje") renderHoje();
+  });
+}
+
+async function toggleDone(goalId) {
+  const current = completions[goalId]?.done || false;
+  await setDoc(doc(db, "completions", `${goalId}_${todayISO()}`), {
+    ownerUid: currentUid, goalId, date: todayISO(), done: !current,
+  }, { merge: true });
+}
+
+async function incrementCheckin(goalId, total) {
+  const current = completions[goalId]?.count || 0;
+  const next = Math.min(total, current + 1);
+  await setDoc(doc(db, "completions", `${goalId}_${todayISO()}`), {
+    ownerUid: currentUid, goalId, date: todayISO(), count: next,
+  }, { merge: true });
+}
+
 function setTab(tab) {
   activeTab = tab;
   document.querySelectorAll("nav.tabbar button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   if (tab === "metas") renderMetas();
+  else if (tab === "hoje") renderHoje();
   else renderPlaceholder(tab);
 }
 
 function renderPlaceholder(tab) {
-  const label = tab === "hoje" ? "Hoje" : "Progresso";
-  tabContent.innerHTML = `<div class="placeholder">A aba "${label}" ainda está sendo construída — chega na próxima etapa 🚧</div>`;
+  tabContent.innerHTML = `<div class="placeholder">A aba "Progresso" ainda está sendo construída — chega na próxima etapa 🚧</div>`;
+}
+
+function renderHoje() {
+  const todays = goals.filter(isActiveToday);
+  const doneFlags = todays.map((g) => {
+    if (g.type === "intervalo") {
+      const total = computeIntervaloTotal(g);
+      return (completions[g.id]?.count || 0) >= total;
+    }
+    return !!completions[g.id]?.done;
+  });
+  const doneCount = doneFlags.filter(Boolean).length;
+  const pct = todays.length ? Math.round((doneCount / todays.length) * 100) : 0;
+  const circumference = 2 * Math.PI * 54;
+  const offset = circumference - (pct / 100) * circumference;
+
+  let html = `
+    <div style="text-align:center; padding-top:8px;">
+      <div style="font-size:12.5px; color:var(--muted); margin-bottom:14px;">${formatTodayLabel()}</div>
+      <div style="position:relative; width:150px; height:150px; margin:0 auto;">
+        <svg width="150" height="150" style="transform:rotate(-90deg);">
+          <circle cx="75" cy="75" r="54" stroke="var(--surfaceHi)" stroke-width="14" fill="none"/>
+          <circle cx="75" cy="75" r="54" stroke="var(--lime)" stroke-width="14" fill="none"
+            stroke-dasharray="${circumference}" stroke-dashoffset="${offset}" stroke-linecap="round"/>
+        </svg>
+        <div style="position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+          <div style="font-family:'Big Shoulders Display'; font-weight:800; font-size:36px; line-height:1;">${pct}%</div>
+          <div style="font-size:10.5px; color:var(--muted); margin-top:2px;">hoje concluído</div>
+        </div>
+      </div>
+    </div>
+    <div class="row-header" style="margin-top:20px; margin-bottom:12px;">
+      <span style="font-family:'Big Shoulders Display'; font-weight:700; font-size:17px;">PRA HOJE</span>
+      <span style="font-family:'JetBrains Mono'; font-size:12px; color:var(--muted);">${doneCount}/${todays.length}</span>
+    </div>
+  `;
+
+  if (!todays.length) {
+    html += `<div class="empty-msg">Nada agendado pra hoje.</div>`;
+  }
+
+  for (const g of todays) {
+    html += hojeCardHTML(g);
+  }
+
+  tabContent.innerHTML = html;
+
+  tabContent.querySelectorAll("[data-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => toggleDone(btn.dataset.toggle));
+  });
+  tabContent.querySelectorAll("[data-checkin]").forEach((btn) => {
+    btn.addEventListener("click", () => incrementCheckin(btn.dataset.checkin, Number(btn.dataset.total)));
+  });
+}
+
+function formatTodayLabel() {
+  const d = new Date();
+  const dias = ["domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado"];
+  return `${dias[d.getDay()]}, ${d.getDate()}/${d.getMonth() + 1}`;
+}
+
+function hojeCardHTML(g) {
+  if (g.type === "intervalo") {
+    const total = computeIntervaloTotal(g);
+    const count = completions[g.id]?.count || 0;
+    const maxed = count >= total;
+    const pct = Math.round((count / total) * 100);
+    return `
+      <div class="goal-card" style="flex-direction:column; align-items:stretch; gap:8px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div class="goal-title">${escapeHTML(g.title)}</div>
+          <button data-checkin="${g.id}" data-total="${total}" ${maxed ? "disabled" : ""}
+            style="min-width:34px; height:30px; padding:0 10px; border-radius:15px; border:1.5px solid ${maxed ? "var(--lime)" : "var(--border)"}; background:${maxed ? "var(--lime)" : "var(--surfaceHi)"}; color:${maxed ? "#0D0A12" : "var(--lime)"}; font-family:'JetBrains Mono'; font-weight:700; font-size:12px; cursor:pointer;">
+            ${maxed ? "✓" : `${count}/${total}`}
+          </button>
+        </div>
+        <div style="height:6px; border-radius:4px; background:var(--border); overflow:hidden;">
+          <div style="width:${pct}%; height:100%; background:linear-gradient(90deg, var(--accent), var(--lime));"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  const done = !!completions[g.id]?.done;
+  return `
+    <div class="goal-card">
+      <div class="goal-title">${escapeHTML(g.title)}</div>
+      <div class="goal-time">${g.time || ""}</div>
+      <button data-toggle="${g.id}"
+        style="width:32px; height:32px; border-radius:50%; border:1.5px solid ${done ? "var(--lime)" : "var(--border)"}; background:${done ? "var(--lime)" : "transparent"}; color:${done ? "#0D0A12" : "var(--muted)"}; font-weight:700; cursor:pointer;">
+        ✓
+      </button>
+    </div>
+  `;
 }
 
 function formatDateBR(iso) {
@@ -203,190 +349,3 @@ function openAddSheet() {
           ).join("")}
         </div>
       </div>
-
-      <div class="field-group">
-        <div class="field-label">Tipo</div>
-        <div class="pill-row" id="f-type-row">
-          ${Object.entries(TYPE_META).map(([k, m]) =>
-            `<button type="button" class="pill" data-type="${k}" style="color:${m.color}">${m.label}</button>`
-          ).join("")}
-        </div>
-        <div class="hint" id="f-type-hint"></div>
-      </div>
-
-      <div id="f-dynamic"></div>
-
-      <button class="save-btn" id="f-save" disabled>Salvar meta</button>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const state = { title: "", cat: "academia", type: "checklist", anyTime: false };
-  overlay.querySelector('[data-cat="academia"]').classList.add("active");
-  overlay.querySelector('[data-type="checklist"]').classList.add("active");
-
-  overlay.querySelector("#close-sheet").addEventListener("click", () => overlay.remove());
-  overlay.querySelector("#f-title").addEventListener("input", (e) => { state.title = e.target.value; updateSaveBtn(); });
-
-  overlay.querySelectorAll("#f-cat-row .pill").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      overlay.querySelectorAll("#f-cat-row .pill").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.cat = btn.dataset.cat;
-    });
-  });
-
-  overlay.querySelectorAll("#f-type-row .pill").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      overlay.querySelectorAll("#f-type-row .pill").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.type = btn.dataset.type;
-      renderDynamicFields(overlay, state);
-      updateSaveBtn();
-    });
-  });
-
-  function updateSaveBtn() {
-    overlay.querySelector("#f-save").disabled = !state.title.trim();
-  }
-
-  renderDynamicFields(overlay, state);
-
-  overlay.querySelector("#f-save").addEventListener("click", async () => {
-    if (!state.title.trim()) return;
-    const newGoal = buildGoalFromState(state, overlay);
-    if (!newGoal) return;
-    await addDoc(collection(db, "goals"), { ...newGoal, ownerUid: currentUid, createdAt: serverTimestamp() });
-    overlay.remove();
-  });
-}
-
-function renderDynamicFields(overlay, state) {
-  const hint = overlay.querySelector("#f-type-hint");
-  const dyn = overlay.querySelector("#f-dynamic");
-
-  const hints = {
-    daily: 'Ex: "lavar louça" — notifica todo dia, sem escolher dias da semana.',
-    intervalo: 'Ex: "comer alguma coisa" — te lembra várias vezes ao longo do dia.',
-    avulso: 'Ex: "pagar conta de luz" — acontece uma vez só, numa data específica.',
-    mensal: 'Ex: "registrar peso" — dispara todo mês, num dia fixo.',
-    checklist: "",
-  };
-  hint.textContent = hints[state.type] || "";
-
-  const whenBlock = (defaultTime = "18:00") => `
-    <div class="field-group">
-      <div class="field-label">Quando notificar</div>
-      <div class="pill-row" style="margin-bottom:10px;">
-        <button type="button" class="pill" data-anytime="false" style="color:var(--accentLight)">Horário fixo</button>
-        <button type="button" class="pill" data-anytime="true" style="color:var(--gold)">Algum momento</button>
-      </div>
-      <input type="time" id="f-time" value="${defaultTime}" />
-    </div>
-  `;
-
-  let html = "";
-  if (state.type === "checklist") {
-    html += whenBlock();
-    html += `
-      <div class="field-group">
-        <div class="field-label">Dias da semana</div>
-        <div class="weekday-row" id="f-weekdays">
-          ${WEEKDAY_LABELS.map((d, i) => `<button type="button" class="weekday-btn" data-day="${i}">${d}</button>`).join("")}
-        </div>
-      </div>
-    `;
-  } else if (state.type === "daily") {
-    html += whenBlock();
-  } else if (state.type === "intervalo") {
-    html += `
-      <div class="field-group">
-        <div class="field-label">Janela e frequência</div>
-        <div style="display:flex; gap:8px;">
-          <input type="time" id="f-int-start" value="07:00" />
-          <input type="time" id="f-int-end" value="22:00" />
-          <input type="number" id="f-int-every" value="3" min="1" style="width:64px;" />
-        </div>
-      </div>
-    `;
-  } else if (state.type === "avulso") {
-    html += `
-      <div class="field-group">
-        <div class="field-label">Data</div>
-        <input type="date" id="f-date" />
-      </div>
-    `;
-    html += whenBlock();
-  } else if (state.type === "mensal") {
-    html += `
-      <div class="field-group">
-        <div class="field-label">Dia do mês</div>
-        <input type="number" id="f-day-of-month" min="1" max="31" value="1" />
-      </div>
-    `;
-    html += whenBlock();
-  }
-
-  dyn.innerHTML = html;
-
-  const anyTimeBtns = dyn.querySelectorAll("[data-anytime]");
-  anyTimeBtns.forEach((btn) => {
-    if (btn.dataset.anytime === "false") btn.classList.add("active");
-    btn.addEventListener("click", () => {
-      anyTimeBtns.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.anyTime = btn.dataset.anytime === "true";
-      const timeInput = dyn.querySelector("#f-time");
-      if (timeInput) timeInput.style.display = state.anyTime ? "none" : "block";
-    });
-  });
-
-  const weekdayRow = dyn.querySelector("#f-weekdays");
-  if (weekdayRow) {
-    state.weekdays = new Set([1, 3, 5]);
-    weekdayRow.querySelectorAll(".weekday-btn").forEach((btn) => {
-      const day = Number(btn.dataset.day);
-      if (state.weekdays.has(day)) btn.classList.add("active");
-      btn.addEventListener("click", () => {
-        if (state.weekdays.has(day)) { state.weekdays.delete(day); btn.classList.remove("active"); }
-        else { state.weekdays.add(day); btn.classList.add("active"); }
-      });
-    });
-  }
-}
-
-function buildGoalFromState(state, overlay) {
-  const base = { title: state.title.trim(), cat: state.cat, type: state.type };
-
-  if (state.type === "checklist") {
-    return { ...base, weekdays: Array.from(state.weekdays || [1, 3, 5]), anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
-  }
-  if (state.type === "daily") {
-    return { ...base, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
-  }
-  if (state.type === "intervalo") {
-    return {
-      ...base,
-      intervalStart: overlay.querySelector("#f-int-start").value,
-      intervalEnd: overlay.querySelector("#f-int-end").value,
-      everyHours: Number(overlay.querySelector("#f-int-every").value) || 1,
-    };
-  }
-  if (state.type === "avulso") {
-    const date = overlay.querySelector("#f-date").value;
-    if (!date) { alert("Escolhe uma data."); return null; }
-    return { ...base, date, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
-  }
-  if (state.type === "mensal") {
-    return {
-      ...base,
-      dayOfMonth: Number(overlay.querySelector("#f-day-of-month").value) || 1,
-      anyTime: state.anyTime,
-      time: overlay.querySelector("#f-time").value,
-      anyTimeWindow: ["09:00", "21:00"],
-    };
-  }
-  return base;
-}
-
-boot();
