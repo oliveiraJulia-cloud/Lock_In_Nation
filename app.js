@@ -1,7 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
 import {
-  getFirestore, collection, query, where, onSnapshot,
+  getFirestore, collection, query, where, orderBy, onSnapshot,
   addDoc, deleteDoc, doc, setDoc, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-messaging.js";
@@ -35,6 +35,10 @@ let swRegistration = null;
 let goals = [];
 let completions = {}; // hoje: goalId -> { done, count }
 let allCompletions = []; // histórico completo, usado em Hoje e Progresso
+let weightEntries = [];
+let measurementEntries = [];
+let cycleEntries = [];
+let bodyExpanded = false;
 let activeTab = "hoje";
 
 const tabContent = document.getElementById("tab-content");
@@ -81,6 +85,7 @@ async function boot() {
     currentUid = user.uid;
     listenGoals();
     listenCompletions();
+    listenBodyData();
     maybeShowNotifBanner();
   });
 
@@ -159,6 +164,33 @@ async function incrementCheckin(goalId, total) {
   await setDoc(doc(db, "completions", `${goalId}_${todayISO()}`), {
     ownerUid: currentUid, goalId, date: todayISO(), count: next,
   }, { merge: true });
+}
+
+// ---------- dados: corpo (peso, medidas, ciclo) ----------
+
+function listenBodyData() {
+  onSnapshot(query(collection(db, "bodyWeight"), where("ownerUid", "==", currentUid)), (snap) => {
+    weightEntries = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.dateISO.localeCompare(b.dateISO));
+    if (activeTab === "progresso") renderProgresso();
+  });
+  onSnapshot(query(collection(db, "bodyMeasurements"), where("ownerUid", "==", currentUid)), (snap) => {
+    measurementEntries = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.dateISO.localeCompare(b.dateISO));
+    if (activeTab === "progresso") renderProgresso();
+  });
+  onSnapshot(query(collection(db, "cycleEntries"), where("ownerUid", "==", currentUid)), (snap) => {
+    cycleEntries = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => a.dateISO.localeCompare(b.dateISO));
+    if (activeTab === "progresso") renderProgresso();
+  });
+}
+
+async function logWeight(kg) {
+  await addDoc(collection(db, "bodyWeight"), { ownerUid: currentUid, dateISO: todayISO(), kg, createdAt: serverTimestamp() });
+}
+async function logMeasurements(vals) {
+  await addDoc(collection(db, "bodyMeasurements"), { ownerUid: currentUid, dateISO: todayISO(), ...vals, createdAt: serverTimestamp() });
+}
+async function logCycle(dateISO) {
+  await addDoc(collection(db, "cycleEntries"), { ownerUid: currentUid, dateISO, createdAt: serverTimestamp() });
 }
 
 // ---------- navegação de abas ----------
@@ -376,10 +408,7 @@ function renderProgresso() {
       </div>
     </div>
 
-    <div class="goal-card" style="opacity:.6;">
-      <div class="goal-title">Corpo (peso, medidas, ciclo)</div>
-      <div class="goal-time">em breve 🚧</div>
-    </div>
+    ${bodySectionHTML()}
 
     <div class="section-label" style="margin-top:14px;">Semanas</div>
   `;
@@ -410,10 +439,233 @@ function renderProgresso() {
 
   tabContent.innerHTML = html;
 
+  const bodyToggle = document.getElementById("body-toggle");
+  if (bodyToggle) bodyToggle.addEventListener("click", () => { bodyExpanded = !bodyExpanded; renderProgresso(); });
+  const btnLogWeight = document.getElementById("btn-log-weight");
+  if (btnLogWeight) btnLogWeight.addEventListener("click", openWeightSheet);
+  const btnLogMeasure = document.getElementById("btn-log-measure");
+  if (btnLogMeasure) btnLogMeasure.addEventListener("click", openMeasurementsSheet);
+  const btnLogCycle = document.getElementById("btn-log-cycle");
+  if (btnLogCycle) btnLogCycle.addEventListener("click", openCycleSheet);
+
   tabContent.querySelectorAll("[data-week]").forEach((btn) => {
     btn.addEventListener("click", () => openWeekSheet(weeks[Number(btn.dataset.week)]));
   });
   document.getElementById("btn-month-summary").addEventListener("click", () => openMonthSummarySheet(history));
+}
+
+// ---------- seção Corpo (peso, medidas, ciclo) ----------
+
+const MEASURE_LABELS = { cintura: "Cintura", peito: "Peito", braco: "Braço", coxa: "Coxa" };
+
+function addDaysISO(dateISO, n) {
+  const d = new Date(dateISO + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return isoFromDate(d);
+}
+function daysBetweenISO(a, b) {
+  return Math.round((new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000);
+}
+
+function lineChartSVG(points, color) {
+  if (points.length < 2) return `<div style="font-size:11.5px; color:var(--muted); padding:8px 0;">Registra mais um valor pra ver o gráfico.</div>`;
+  const w = 280, h = 56, pad = 6;
+  const vals = points.map((p) => p.v);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const range = max - min || 1;
+  const coords = points.map((p, i) => {
+    const x = pad + (i / (points.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((p.v - min) / range) * (h - pad * 2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  const dots = points.map((p, i) => {
+    const [x, y] = coords[i].split(",");
+    return `<circle cx="${x}" cy="${y}" r="3" fill="${color}" />`;
+  }).join("");
+  return `
+    <svg width="100%" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="overflow:visible;">
+      <polyline points="${coords.join(" ")}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+      ${dots}
+    </svg>
+  `;
+}
+
+function bodySectionHTML() {
+  const lastWeight = weightEntries[weightEntries.length - 1];
+  const firstWeight = weightEntries[0];
+  const weightDelta = lastWeight && firstWeight ? (lastWeight.kg - firstWeight.kg).toFixed(1) : null;
+
+  const chevron = bodyExpanded ? "▲" : "▼";
+  let inner = "";
+
+  if (bodyExpanded) {
+    // --- peso ---
+    inner += `
+      <div style="margin-top:14px;">
+        <div class="row-header" style="margin-bottom:8px;">
+          <span class="section-label" style="margin:0;">Peso</span>
+          <button class="btn-icon" id="btn-log-weight" style="width:26px; height:26px; font-size:14px; border-radius:8px;">+</button>
+        </div>
+        ${lastWeight ? `
+          <div style="display:flex; align-items:baseline; gap:8px; margin-bottom:6px;">
+            <span style="font-family:'Big Shoulders Display'; font-weight:800; font-size:24px;">${lastWeight.kg}kg</span>
+            ${weightDelta !== null ? `<span style="font-family:'JetBrains Mono'; font-size:11px; color:${Number(weightDelta) <= 0 ? "var(--lime)" : "var(--gold)"};">${Number(weightDelta) > 0 ? "+" : ""}${weightDelta}kg desde ${formatDateBR(firstWeight.dateISO)}</span>` : ""}
+          </div>
+        ` : `<div class="empty-msg" style="padding:16px 0;">Nenhum registro ainda.</div>`}
+        ${lineChartSVG(weightEntries.slice(-10).map((e) => ({ v: e.kg })), "var(--lime)")}
+      </div>
+    `;
+
+    // --- medidas ---
+    const lastM = measurementEntries[measurementEntries.length - 1];
+    const firstM = measurementEntries[0];
+    inner += `
+      <div style="margin-top:18px;">
+        <div class="row-header" style="margin-bottom:8px;">
+          <span class="section-label" style="margin:0;">Medidas</span>
+          <button class="btn-icon" id="btn-log-measure" style="width:26px; height:26px; font-size:14px; border-radius:8px;">+</button>
+        </div>
+        ${lastM ? Object.keys(MEASURE_LABELS).map((k) => {
+          const cur = lastM[k];
+          const delta = firstM ? (cur - firstM[k]) : 0;
+          return `
+            <div style="display:flex; justify-content:space-between; padding:4px 0; font-size:13px;">
+              <span>${MEASURE_LABELS[k]}</span>
+              <span style="font-family:'JetBrains Mono';">${cur}cm <span style="color:${delta === 0 ? "var(--muted)" : delta < 0 ? "var(--lime)" : "var(--gold)"};">(${delta > 0 ? "+" : ""}${delta}cm)</span></span>
+            </div>
+          `;
+        }).join("") : `<div class="empty-msg" style="padding:16px 0;">Nenhum registro ainda.</div>`}
+      </div>
+    `;
+
+    // --- ciclo ---
+    const lastCycle = cycleEntries[cycleEntries.length - 1];
+    let avgCycle = null, predicted = null;
+    if (cycleEntries.length >= 2) {
+      const diffs = [];
+      for (let i = 1; i < cycleEntries.length; i++) diffs.push(daysBetweenISO(cycleEntries[i - 1].dateISO, cycleEntries[i].dateISO));
+      avgCycle = Math.round(diffs.reduce((a, b) => a + b, 0) / diffs.length);
+      predicted = addDaysISO(lastCycle.dateISO, avgCycle);
+    }
+    inner += `
+      <div style="margin-top:18px;">
+        <div class="row-header" style="margin-bottom:8px;">
+          <span class="section-label" style="margin:0;">Ciclo menstrual</span>
+          <button class="btn-icon" id="btn-log-cycle" style="width:26px; height:26px; font-size:14px; border-radius:8px;">+</button>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:13px; padding:4px 0;">
+          <span>Último início</span>
+          <span style="font-family:'JetBrains Mono';">${lastCycle ? formatDateBR(lastCycle.dateISO) : "—"}</span>
+        </div>
+        ${avgCycle ? `
+          <div style="display:flex; justify-content:space-between; font-size:13px; padding:4px 0;">
+            <span>Ciclo médio</span>
+            <span style="font-family:'JetBrains Mono';">${avgCycle} dias</span>
+          </div>
+          <div style="background:rgba(232,93,156,.12); border:1px solid rgba(232,93,156,.4); border-radius:10px; padding:8px 10px; margin-top:8px; font-size:12px; color:var(--pink);">
+            Próximo previsto: <strong>${formatDateBR(predicted)}</strong>
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="goal-card" style="flex-direction:column; align-items:stretch; cursor:pointer;" id="body-toggle">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="goal-title">Corpo</div>
+        <div class="goal-time">${lastWeight ? `${lastWeight.kg}kg · ` : ""}peso, medidas & ciclo</div>
+        <span style="color:var(--muted); font-size:11px;">${chevron}</span>
+      </div>
+      ${inner}
+    </div>
+  `;
+}
+
+function openWeightSheet() {
+  const last = weightEntries[weightEntries.length - 1];
+  const overlay = document.createElement("div");
+  overlay.className = "sheet-overlay";
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-header">
+        <span class="sheet-title">REGISTRAR PESO</span>
+        <button class="sheet-close" id="close-sheet-weight">✕</button>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Peso de hoje (kg)</div>
+        <input type="number" step="0.1" id="f-weight" value="${last ? last.kg : ""}" />
+      </div>
+      <button class="save-btn" id="save-weight">Salvar registro</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector("#close-sheet-weight").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("#save-weight").addEventListener("click", async () => {
+    const val = Number(overlay.querySelector("#f-weight").value);
+    if (!val) return;
+    await logWeight(val);
+    overlay.remove();
+  });
+}
+
+function openMeasurementsSheet() {
+  const last = measurementEntries[measurementEntries.length - 1] || {};
+  const overlay = document.createElement("div");
+  overlay.className = "sheet-overlay";
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-header">
+        <span class="sheet-title">REGISTRAR MEDIDAS</span>
+        <button class="sheet-close" id="close-sheet-measure">✕</button>
+      </div>
+      ${Object.keys(MEASURE_LABELS).map((k) => `
+        <div class="field-group">
+          <div class="field-label">${MEASURE_LABELS[k]} (cm)</div>
+          <input type="number" step="0.5" id="f-m-${k}" value="${last[k] ?? ""}" />
+        </div>
+      `).join("")}
+      <button class="save-btn" id="save-measure">Salvar medidas</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector("#close-sheet-measure").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("#save-measure").addEventListener("click", async () => {
+    const vals = {};
+    for (const k of Object.keys(MEASURE_LABELS)) {
+      const v = Number(overlay.querySelector(`#f-m-${k}`).value);
+      if (!v) { alert("Preenche todas as medidas."); return; }
+      vals[k] = v;
+    }
+    await logMeasurements(vals);
+    overlay.remove();
+  });
+}
+
+function openCycleSheet() {
+  const overlay = document.createElement("div");
+  overlay.className = "sheet-overlay";
+  overlay.innerHTML = `
+    <div class="sheet">
+      <div class="sheet-header">
+        <span class="sheet-title">REGISTRAR CICLO</span>
+        <button class="sheet-close" id="close-sheet-cycle">✕</button>
+      </div>
+      <div class="field-group">
+        <div class="field-label">Data de início</div>
+        <input type="date" id="f-cycle-date" value="${todayISO()}" />
+      </div>
+      <button class="save-btn" id="save-cycle">Salvar data</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector("#close-sheet-cycle").addEventListener("click", () => overlay.remove());
+  overlay.querySelector("#save-cycle").addEventListener("click", async () => {
+    const val = overlay.querySelector("#f-cycle-date").value;
+    if (!val) return;
+    await logCycle(val);
+    overlay.remove();
+  });
 }
 
 function openWeekSheet(chunk) {
@@ -700,83 +952,3 @@ function renderDynamicFields(overlay, state) {
       </div>
     `;
   } else if (state.type === "avulso") {
-    html += `
-      <div class="field-group">
-        <div class="field-label">Data</div>
-        <input type="date" id="f-date" />
-      </div>
-    `;
-    html += whenBlock();
-  } else if (state.type === "mensal") {
-    html += `
-      <div class="field-group">
-        <div class="field-label">Dia do mês</div>
-        <input type="number" id="f-day-of-month" min="1" max="31" value="1" />
-      </div>
-    `;
-    html += whenBlock();
-  }
-
-  dyn.innerHTML = html;
-
-  const anyTimeBtns = dyn.querySelectorAll("[data-anytime]");
-  anyTimeBtns.forEach((btn) => {
-    if (btn.dataset.anytime === "false") btn.classList.add("active");
-    btn.addEventListener("click", () => {
-      anyTimeBtns.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.anyTime = btn.dataset.anytime === "true";
-      const timeInput = dyn.querySelector("#f-time");
-      if (timeInput) timeInput.style.display = state.anyTime ? "none" : "block";
-    });
-  });
-
-  const weekdayRow = dyn.querySelector("#f-weekdays");
-  if (weekdayRow) {
-    state.weekdays = new Set([1, 3, 5]);
-    weekdayRow.querySelectorAll(".weekday-btn").forEach((btn) => {
-      const day = Number(btn.dataset.day);
-      if (state.weekdays.has(day)) btn.classList.add("active");
-      btn.addEventListener("click", () => {
-        if (state.weekdays.has(day)) { state.weekdays.delete(day); btn.classList.remove("active"); }
-        else { state.weekdays.add(day); btn.classList.add("active"); }
-      });
-    });
-  }
-}
-
-function buildGoalFromState(state, overlay) {
-  const base = { title: state.title.trim(), cat: state.cat, type: state.type };
-
-  if (state.type === "checklist") {
-    return { ...base, weekdays: Array.from(state.weekdays || [1, 3, 5]), anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
-  }
-  if (state.type === "daily") {
-    return { ...base, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
-  }
-  if (state.type === "intervalo") {
-    return {
-      ...base,
-      intervalStart: overlay.querySelector("#f-int-start").value,
-      intervalEnd: overlay.querySelector("#f-int-end").value,
-      everyHours: Number(overlay.querySelector("#f-int-every").value) || 1,
-    };
-  }
-  if (state.type === "avulso") {
-    const date = overlay.querySelector("#f-date").value;
-    if (!date) { alert("Escolhe uma data."); return null; }
-    return { ...base, date, anyTime: state.anyTime, time: overlay.querySelector("#f-time").value, anyTimeWindow: ["09:00", "21:00"] };
-  }
-  if (state.type === "mensal") {
-    return {
-      ...base,
-      dayOfMonth: Number(overlay.querySelector("#f-day-of-month").value) || 1,
-      anyTime: state.anyTime,
-      time: overlay.querySelector("#f-time").value,
-      anyTimeWindow: ["09:00", "21:00"],
-    };
-  }
-  return base;
-}
-
-boot();
