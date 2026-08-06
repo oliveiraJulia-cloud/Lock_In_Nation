@@ -92,12 +92,15 @@ async function main() {
       log = { date: today.dateISO, firedTimes: [] };
     }
 
-    let anyTimeSlot = log.anyTimeSlot;
-    if (goal.anyTime && (!anyTimeSlot || log.date !== today.dateISO)) {
-      const window = goal.anyTimeWindow || ["09:00", "21:00"];
-      anyTimeSlot = randomTimeInWindow(window[0], window[1]);
+   let anyTimeSlot;
+    if (goal.anyTime) {
+      anyTimeSlot = log.anyTimeSlot;
+      if (!anyTimeSlot || log.date !== today.dateISO) {
+        const window = goal.anyTimeWindow || ["09:00", "21:00"];
+        anyTimeSlot = randomTimeInWindow(window[0], window[1]);
+      }
+      log.anyTimeSlot = anyTimeSlot;
     }
-    log.anyTimeSlot = anyTimeSlot;
 
     const times = computeFireTimes(goal, today, anyTimeSlot);
     for (const time of times) events.push({ goal, time, minutes: toMinutes(time), originalMinutes: toMinutes(time), log, logRef });
