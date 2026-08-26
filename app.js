@@ -914,9 +914,10 @@ function openAddSheet(existingGoal = null) {
   });
 }
 
-function renderDynamicFields(overlay, state) {
+function renderDynamicFields(overlay, state, existingGoal = null) {
   const hint = overlay.querySelector("#f-type-hint");
   const dyn = overlay.querySelector("#f-dynamic");
+  const sameType = existingGoal && existingGoal.type === state.type;
 
   const hints = {
     daily: 'Ex: "lavar louça" — notifica todo dia, sem escolher dias da semana.',
@@ -940,7 +941,7 @@ function renderDynamicFields(overlay, state) {
 
   let html = "";
   if (state.type === "checklist") {
-    html += whenBlock();
+    html += whenBlock(sameType ? existingGoal.time : "18:00");
     html += `
       <div class="field-group">
         <div class="field-label">Dias da semana</div>
@@ -950,15 +951,15 @@ function renderDynamicFields(overlay, state) {
       </div>
     `;
   } else if (state.type === "daily") {
-    html += whenBlock();
+    html += whenBlock(sameType ? existingGoal.time : "18:00");
   } else if (state.type === "intervalo") {
     html += `
       <div class="field-group">
         <div class="field-label">Janela e frequência</div>
         <div style="display:flex; gap:8px;">
-          <input type="time" id="f-int-start" value="07:00" />
-          <input type="time" id="f-int-end" value="22:00" />
-          <input type="number" id="f-int-every" value="3" min="1" style="width:64px;" />
+          <input type="time" id="f-int-start" value="${sameType ? existingGoal.intervalStart : "07:00"}" />
+          <input type="time" id="f-int-end" value="${sameType ? existingGoal.intervalEnd : "22:00"}" />
+          <input type="number" id="f-int-every" value="${sameType ? existingGoal.everyHours : 3}" min="1" style="width:64px;" />
         </div>
       </div>
     `;
@@ -966,25 +967,25 @@ function renderDynamicFields(overlay, state) {
     html += `
       <div class="field-group">
         <div class="field-label">Data</div>
-        <input type="date" id="f-date" />
+        <input type="date" id="f-date" value="${sameType ? existingGoal.date : ""}" />
       </div>
     `;
-    html += whenBlock();
+    html += whenBlock(sameType ? existingGoal.time : "18:00");
   } else if (state.type === "mensal") {
     html += `
       <div class="field-group">
         <div class="field-label">Dia do mês</div>
-        <input type="number" id="f-day-of-month" min="1" max="31" value="1" />
+        <input type="number" id="f-day-of-month" min="1" max="31" value="${sameType ? existingGoal.dayOfMonth : 1}" />
       </div>
     `;
-    html += whenBlock();
+    html += whenBlock(sameType ? existingGoal.time : "18:00");
   }
 
   dyn.innerHTML = html;
 
   const anyTimeBtns = dyn.querySelectorAll("[data-anytime]");
   anyTimeBtns.forEach((btn) => {
-    if (btn.dataset.anytime === "false") btn.classList.add("active");
+    if ((btn.dataset.anytime === "true") === state.anyTime) btn.classList.add("active");
     btn.addEventListener("click", () => {
       anyTimeBtns.forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
@@ -993,10 +994,12 @@ function renderDynamicFields(overlay, state) {
       if (timeInput) timeInput.style.display = state.anyTime ? "none" : "block";
     });
   });
+  const timeInputInit = dyn.querySelector("#f-time");
+  if (timeInputInit && state.anyTime) timeInputInit.style.display = "none";
 
   const weekdayRow = dyn.querySelector("#f-weekdays");
   if (weekdayRow) {
-    state.weekdays = new Set([1, 3, 5]);
+    state.weekdays = new Set(state.type === "checklist" && sameType && existingGoal.weekdays ? existingGoal.weekdays : [1, 3, 5]);
     weekdayRow.querySelectorAll(".weekday-btn").forEach((btn) => {
       const day = Number(btn.dataset.day);
       if (state.weekdays.has(day)) btn.classList.add("active");
