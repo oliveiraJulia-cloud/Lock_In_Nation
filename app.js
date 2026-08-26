@@ -798,9 +798,12 @@ function renderMetas() {
   }
 
   tabContent.innerHTML = html;
-  document.getElementById("btn-add-goal").addEventListener("click", openAddSheet);
+  document.getElementById("btn-add-goal").addEventListener("click", () => openAddSheet());
   tabContent.querySelectorAll("[data-del]").forEach((btn) => {
     btn.addEventListener("click", () => deleteGoal(btn.dataset.del));
+  });
+  tabContent.querySelectorAll("[data-edit]").forEach((btn) => {
+    btn.addEventListener("click", () => openAddSheet(goals.find((g) => g.id === btn.dataset.edit)));
   });
 }
 
