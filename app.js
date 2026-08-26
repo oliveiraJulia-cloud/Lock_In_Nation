@@ -809,6 +809,7 @@ function goalCardHTML(g, isAvulso) {
     <div class="goal-card${isAvulso ? " avulso" : ""}">
       <div class="goal-title">${escapeHTML(g.title)}</div>
       <div class="goal-time">${goalTimeLabel(g)}</div>
+      <button class="goal-edit" data-edit="${g.id}">✎</button>
       <button class="goal-del" data-del="${g.id}">✕</button>
     </div>
   `;
