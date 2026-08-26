@@ -825,20 +825,20 @@ function escapeHTML(str) {
 }
 
 // ---------- formulário de cadastro ----------
-
-function openAddSheet() {
+function openAddSheet(existingGoal = null) {
+  const isEdit = !!existingGoal;
   const overlay = document.createElement("div");
   overlay.className = "sheet-overlay";
   overlay.innerHTML = `
     <div class="sheet">
       <div class="sheet-header">
-        <span class="sheet-title">NOVA META</span>
+        <span class="sheet-title">${isEdit ? "EDITAR META" : "NOVA META"}</span>
         <button class="sheet-close" id="close-sheet">✕</button>
       </div>
 
       <div class="field-group">
         <div class="field-label">Título</div>
-        <input type="text" id="f-title" placeholder="Ex: Treino de perna" />
+        <input type="text" id="f-title" placeholder="Ex: Treino de perna" value="${isEdit ? escapeHTML(existingGoal.title) : ""}" />
       </div>
 
       <div class="field-group">
@@ -862,14 +862,17 @@ function openAddSheet() {
 
       <div id="f-dynamic"></div>
 
-      <button class="save-btn" id="f-save" disabled>Salvar meta</button>
+      <button class="save-btn" id="f-save" ${isEdit ? "" : "disabled"}>${isEdit ? "Salvar alterações" : "Salvar meta"}</button>
     </div>
   `;
   document.body.appendChild(overlay);
 
-  const state = { title: "", cat: "academia", type: "checklist", anyTime: false };
-  overlay.querySelector('[data-cat="academia"]').classList.add("active");
-  overlay.querySelector('[data-type="checklist"]').classList.add("active");
+  const state = isEdit
+    ? { title: existingGoal.title, cat: existingGoal.cat, type: existingGoal.type, anyTime: !!existingGoal.anyTime }
+    : { title: "", cat: "academia", type: "checklist", anyTime: false };
+
+  overlay.querySelector(`[data-cat="${state.cat}"]`).classList.add("active");
+  overlay.querySelector(`[data-type="${state.type}"]`).classList.add("active");
 
   overlay.querySelector("#close-sheet").addEventListener("click", () => overlay.remove());
   overlay.querySelector("#f-title").addEventListener("input", (e) => { state.title = e.target.value; updateSaveBtn(); });
@@ -887,7 +890,7 @@ function openAddSheet() {
       overlay.querySelectorAll("#f-type-row .pill").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       state.type = btn.dataset.type;
-      renderDynamicFields(overlay, state);
+      renderDynamicFields(overlay, state, null); // troca manual de tipo não reaproveita valores antigos
       updateSaveBtn();
     });
   });
@@ -896,13 +899,17 @@ function openAddSheet() {
     overlay.querySelector("#f-save").disabled = !state.title.trim();
   }
 
-  renderDynamicFields(overlay, state);
+  renderDynamicFields(overlay, state, existingGoal);
 
   overlay.querySelector("#f-save").addEventListener("click", async () => {
     if (!state.title.trim()) return;
     const newGoal = buildGoalFromState(state, overlay);
     if (!newGoal) return;
-    await addDoc(collection(db, "goals"), { ...newGoal, ownerUid: currentUid, createdAt: serverTimestamp() });
+    if (isEdit) {
+      await updateDoc(doc(db, "goals", existingGoal.id), newGoal);
+    } else {
+      await addDoc(collection(db, "goals"), { ...newGoal, ownerUid: currentUid, createdAt: serverTimestamp() });
+    }
     overlay.remove();
   });
 }
