@@ -1,0 +1,9 @@
+{
+  "name": "metas-pessoais-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "firebase-admin": "^12.6.0"
+  }
+}
